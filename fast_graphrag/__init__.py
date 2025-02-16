@@ -91,6 +91,7 @@ class GraphRAG(BaseGraphRAG[TEmbedding, THash, TChunk, TEntity, TRelation, TId])
             default_factory=lambda: EdgeUpsertPolicy_UpsertValidAndMergeSimilarByLLM()
         )
 
+
         def __post_init__(self):
             """Initialize the GraphRAG Config class."""
             self.entity_storage.embedding_dim = self.embedding_service.embedding_dim

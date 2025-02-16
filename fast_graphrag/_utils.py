@@ -79,8 +79,8 @@ def extract_sorted_scores(
     probabilities = row_vector.data
 
     # Step 3: Use NumPy to create arrays for indices and probabilities
-    indices_array = np.array(non_zero_indices)
-    probabilities_array = np.array(probabilities)
+    indices_array = np.array(non_zero_indices, dtype=np.int64)
+    probabilities_array = np.array(probabilities, dtype=np.float32)
 
     # Step 4: Sort the probabilities and get the sorted indices
     sorted_indices = np.argsort(probabilities_array)[::-1]

@@ -1,13 +1,16 @@
 import re
 from dataclasses import dataclass, field
-from itertools import chain
 from typing import Iterable, List, Set, Tuple
 
 import xxhash
 
-from fast_graphrag._types import TChunk, TDocument, THash
+from fast_graphrag._types import (
+    TChunk, 
+    TDocument, 
+    THash,
+    TCitation  # Import TCitation from types
+)
 from fast_graphrag._utils import TOKEN_TO_CHAR_RATIO
-
 from ._base import BaseChunkingService
 
 DEFAULT_SEPARATORS = [
@@ -25,17 +28,15 @@ DEFAULT_SEPARATORS = [
     "?",  # English question mark
 ]
 
-
 @dataclass
 class DefaultChunkingServiceConfig:
     separators: List[str] = field(default_factory=lambda: DEFAULT_SEPARATORS)
     chunk_token_size: int = field(default=800)
     chunk_token_overlap: int = field(default=100)
 
-
 @dataclass
 class DefaultChunkingService(BaseChunkingService[TChunk]):
-    """Default class for chunk extractor."""
+    """Default class for chunk extractor with citation tracking."""
 
     config: DefaultChunkingServiceConfig = field(default_factory=DefaultChunkingServiceConfig)
 
@@ -61,6 +62,7 @@ class DefaultChunkingService(BaseChunkingService[TChunk]):
         return chunks_per_data
 
     async def _extract_chunks(self, data: TDocument) -> List[TChunk]:
+        """Extract chunks from a document while tracking offsets."""
         # Sanitise input data:
         try:
             data.data = data.data.encode(errors="replace").decode()
@@ -69,68 +71,124 @@ class DefaultChunkingService(BaseChunkingService[TChunk]):
             data.data = re.sub(r"[\x00-\x09\x11-\x12\x14-\x1f]", " ", data.data)
 
         if len(data.data) <= self._chunk_size:
-            chunks = [data.data]
+            # For single chunk, use entire document range
+            return [
+                TChunk(
+                    id=THash(xxhash.xxh3_64_intdigest(data.data)),
+                    content=data.data,
+                    metadata=data.metadata,
+                    citation=TCitation(
+                        start_offset=0,
+                        end_offset=len(data.data),
+                        document_id=data.metadata.get('document_id', ''),
+                        document_name=data.metadata.get('document_name', None)
+                    )
+                )
+            ]
         else:
-            chunks = self._split_text(data.data)
+            # Split text and track offsets
+            chunks_with_offsets = self._split_text_with_offsets(data.data)
+            return [
+                TChunk(
+                    id=THash(xxhash.xxh3_64_intdigest(chunk)),
+                    content=chunk,
+                    metadata=data.metadata,
+                    citation=TCitation(
+                        start_offset=start_offset,
+                        end_offset=end_offset,
+                        document_id=data.metadata.get('document_id', ''),
+                        document_name=data.metadata.get('document_name', None)
+                    )
+                )
+                for chunk, start_offset, end_offset in chunks_with_offsets
+            ]
 
-        return [
-            TChunk(
-                id=THash(xxhash.xxh3_64_intdigest(chunk)),
-                content=chunk,
-                metadata=data.metadata,
-            )
-            for chunk in chunks
-        ]
+    def _split_text_with_offsets(self, text: str) -> List[Tuple[str, int, int]]:
+        """Split text and track original character offsets."""
+        splits_with_offsets: List[Tuple[str, int, int]] = []
+        current_offset = 0
+        
+        # Split text and keep track of separator positions
+        parts = self._split_re.split(text)
+        
+        for i, part in enumerate(parts):
+            if not part:  # Skip empty parts
+                continue
+                
+            # If it's a separator (odd indices), just update offset
+            if i % 2 == 1:
+                current_offset += len(part)
+                continue
+                
+            # For content parts, track the offsets
+            splits_with_offsets.append((part, current_offset, current_offset + len(part)))
+            current_offset += len(part)
+            
+        return self._merge_splits_with_offsets(splits_with_offsets)
 
-    def _split_text(self, text: str) -> List[str]:
-        return self._merge_splits(self._split_re.split(text))
-
-    def _merge_splits(self, splits: List[str]) -> List[str]:
+    def _merge_splits_with_offsets(
+        self, 
+        splits: List[Tuple[str, int, int]]
+    ) -> List[Tuple[str, int, int]]:
+        """Merge splits while preserving character offsets."""
         if not splits:
             return []
 
-        # Add empty string to the end to have a separator at the end of the last chunk
-        splits.append("")
+        merged_splits: List[Tuple[str, int, int]] = []
+        current_chunk: List[Tuple[str, int, int]] = []
+        current_length = 0
 
-        merged_splits: List[List[Tuple[str, int]]] = []
-        current_chunk: List[Tuple[str, int]] = []
-        current_chunk_length: int = 0
-
-        for i, split in enumerate(splits):
-            split_length: int = len(split)
-            # Ignore splitting if it's a separator
-            if (i % 2 == 1) or (
-                current_chunk_length + split_length <= self._chunk_size - (self._chunk_overlap if i > 0 else 0)
+        for split, start_offset, end_offset in splits:
+            split_length = len(split)
+            
+            if current_length + split_length <= self._chunk_size - (
+                self._chunk_overlap if current_chunk else 0
             ):
-                current_chunk.append((split, split_length))
-                current_chunk_length += split_length
+                current_chunk.append((split, start_offset, end_offset))
+                current_length += split_length
             else:
-                merged_splits.append(current_chunk)
-                current_chunk = [(split, split_length)]
-                current_chunk_length = split_length
+                if current_chunk:
+                    chunk_text = "".join(part[0] for part in current_chunk)
+                    chunk_start = current_chunk[0][1]
+                    chunk_end = current_chunk[-1][2]
+                    merged_splits.append((chunk_text, chunk_start, chunk_end))
+                
+                current_chunk = [(split, start_offset, end_offset)]
+                current_length = split_length
 
-        merged_splits.append(current_chunk)
+        # Add the last chunk
+        if current_chunk:
+            chunk_text = "".join(part[0] for part in current_chunk)
+            chunk_start = current_chunk[0][1]
+            chunk_end = current_chunk[-1][2]
+            merged_splits.append((chunk_text, chunk_start, chunk_end))
 
         if self._chunk_overlap > 0:
-            return self._enforce_overlap(merged_splits)
-        else:
-            r = ["".join((c[0] for c in chunk)) for chunk in merged_splits]
+            return self._enforce_overlap_with_offsets(merged_splits)
+        
+        return merged_splits
 
-        return r
-
-    def _enforce_overlap(self, chunks: List[List[Tuple[str, int]]]) -> List[str]:
-        result: List[str] = []
-        for i, chunk in enumerate(chunks):
+    def _enforce_overlap_with_offsets(
+        self, 
+        chunks: List[Tuple[str, int, int]]
+    ) -> List[Tuple[str, int, int]]:
+        """Enforce overlap while preserving offset information."""
+        result: List[Tuple[str, int, int]] = []
+        
+        for i, (chunk_text, start_offset, end_offset) in enumerate(chunks):
             if i == 0:
-                result.append("".join((c[0] for c in chunk)))
+                result.append((chunk_text, start_offset, end_offset))
             else:
-                # Compute overlap
-                overlap_length: int = 0
-                overlap: List[str] = []
-                for text, length in reversed(chunks[i - 1]):
-                    if overlap_length + length > self._chunk_overlap:
-                        break
-                    overlap_length += length
-                    overlap.append(text)
-                result.append("".join(chain(reversed(overlap), (c[0] for c in chunk))))
+                # Calculate overlap with previous chunk
+                prev_chunk = chunks[i-1][0]
+                overlap_size = min(self._chunk_overlap, len(prev_chunk))
+                overlap_text = prev_chunk[-overlap_size:]
+                
+                # Create new chunk with overlap
+                new_chunk = overlap_text + chunk_text
+                # Adjust start offset to account for overlap
+                new_start = end_offset - len(new_chunk)
+                
+                result.append((new_chunk, new_start, end_offset))
+        
         return result

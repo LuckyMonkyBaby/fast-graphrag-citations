@@ -17,7 +17,7 @@ from typing import (
 
 from scipy.sparse import csr_matrix  # type: ignore
 
-from fast_graphrag._types import GTBlob, GTEdge, GTEmbedding, GTId, GTKey, GTNode, GTValue, TIndex, TScore
+from fast_graphrag._types import GTBlob, GTEdge, GTEmbedding, GTId, GTKey, GTNode, GTValue, TIndex, TScore, TCitation
 from fast_graphrag._utils import logger
 
 from ._namespace import Namespace
@@ -268,3 +268,4 @@ class BaseGraphStorage(BaseStorage, Generic[GTNode, GTEdge, GTId]):
     async def score_nodes(self, initial_weights: Optional[csr_matrix]) -> csr_matrix:
         """Score nodes based on the initial weights."""
         raise NotImplementedError
+    

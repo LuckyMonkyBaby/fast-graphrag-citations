@@ -93,6 +93,12 @@ TScore: TypeAlias = np.float32
 TIndex: TypeAlias = int
 TId: TypeAlias = str
 
+@dataclass
+class TCitation:
+    start_offset: int
+    end_offset: int
+    document_id: str
+    document_name: Optional[str] = None
 
 @dataclass
 class TDocument:
@@ -104,11 +110,12 @@ class TDocument:
 
 @dataclass
 class TChunk(BTChunk):
-    F_TO_CONTEXT = ["content", "metadata"]
-
-    id: THash = field()
-    content: str = field()
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    F_TO_CONTEXT = ["content", "metadata", "citation"]  # Add citation to context fields
+    
+    id: THash
+    content: str
+    metadata: Dict[str, Any]
+    citation: Optional[TCitation] = None
 
     def __str__(self) -> str:
         return self.content
@@ -117,11 +124,12 @@ class TChunk(BTChunk):
 # Graph types
 @dataclass
 class TEntity(BaseModelAlias, BTNode):
-    F_TO_CONTEXT = ["name", "description"]
-
-    name: str = field()
-    type: str = field()
-    description: str = field()
+    F_TO_CONTEXT = ["name", "description", "citations"]  # Add citations to context fields
+    
+    name: str
+    type: str 
+    description: str
+    citations: List[TCitation] = field(default_factory=list)
 
     def to_str(self) -> str:
         s = f"[{self.type}] {self.name}"
@@ -151,12 +159,13 @@ class TEntity(BaseModelAlias, BTNode):
 
 @dataclass
 class TRelation(BaseModelAlias, BTEdge):
-    F_TO_CONTEXT = ["source", "target", "description"]
+    F_TO_CONTEXT = ["source", "target", "description", "citations"]
 
     source: str = field()
     target: str = field()
     description: str = field()
     chunks: List[THash] | None = field(default=None)
+    citations: List[TCitation] = field(default_factory=list)
 
     @staticmethod
     def to_attrs(
