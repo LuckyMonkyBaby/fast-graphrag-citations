@@ -30,7 +30,7 @@ TIMEOUT_SECONDS = 180.0
 class OpenAILLMService(BaseLLMService):
     """LLM Service for OpenAI LLMs."""
 
-    model: Optional[str] = field(default="gpt-4o-mini")
+    model: Optional[str] = field(default="o1-mini")
     mode: instructor.Mode = field(default=instructor.Mode.JSON)
     client: Literal["openai", "azure"] = field(default="openai")
     api_version: Optional[str] = field(default=None)
