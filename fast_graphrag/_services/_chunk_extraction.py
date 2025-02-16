@@ -80,8 +80,6 @@ class DefaultChunkingService(BaseChunkingService[TChunk]):
                     citation=TCitation(
                         start_offset=0,
                         end_offset=len(data.data),
-                        document_id=data.metadata.get('document_id', ''),
-                        document_name=data.metadata.get('document_name', None)
                     )
                 )
             ]
@@ -96,8 +94,6 @@ class DefaultChunkingService(BaseChunkingService[TChunk]):
                     citation=TCitation(
                         start_offset=start_offset,
                         end_offset=end_offset,
-                        document_id=data.metadata.get('document_id', ''),
-                        document_name=data.metadata.get('document_name', None)
                     )
                 )
                 for chunk, start_offset, end_offset in chunks_with_offsets

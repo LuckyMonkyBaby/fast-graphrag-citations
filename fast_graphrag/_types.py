@@ -97,8 +97,6 @@ TId: TypeAlias = str
 class TCitation:
     start_offset: int
     end_offset: int
-    document_id: str
-    document_name: Optional[str] = None
 
 @dataclass
 class TDocument:
