@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Generic, List, Optional, Tuple, Union
-from enum import Enum, auto
 
 from fast_graphrag._llm import BaseLLMService, format_and_send_prompt
 from fast_graphrag._llm._base import BaseEmbeddingService
@@ -22,24 +21,24 @@ class InsertParam:
     pass
 
 
-class PromptType(Enum):
-    DEFAULT = auto()                     # Default narrative response
-    WITH_REFERENCES = auto()             # Response with source references
-    JSON = auto()                        # JSON-formatted response
-    SCHEMA_JSON = auto()                 # JSON with specific schema
-    TABLE = auto()                       # Tabular format response
-    BULLET_POINTS = auto()               # Bullet point list response
-    CUSTOM = auto()                      # Custom pr
-
 @dataclass
 class QueryParam:
+    # Prompt type constants
+    PROMPT_DEFAULT = "DEFAULT"
+    PROMPT_WITH_REFERENCES = "WITH_REFERENCES"
+    PROMPT_JSON = "JSON"
+    PROMPT_SCHEMA_JSON = "SCHEMA_JSON"
+    PROMPT_TABLE = "TABLE"
+    PROMPT_BULLET_POINTS = "BULLET_POINTS"
+    PROMPT_CUSTOM = "CUSTOM"
+    
     with_references: bool = field(default=False)
     only_context: bool = field(default=False)
     entities_max_tokens: int = field(default=4000)
     relations_max_tokens: int = field(default=3000)
     chunks_max_tokens: int = field(default=9000)
-    prompt_type: PromptType = field(default=PromptType.DEFAULT)
-    custom_prompt_key: Optional[str] = field(default=None) 
+    prompt_type: str = field(default=PROMPT_DEFAULT)
+    custom_prompt_key: Optional[str] = field(default=None)
 
 
 @dataclass
@@ -234,11 +233,11 @@ class BaseGraphRAG(Generic[GTEmbedding, GTHash, GTChunk, GTNode, GTEdge, GTId]):
     def _get_prompt_key(self, params: QueryParam) -> str:
         """Determine which prompt key to use based on the query parameters."""
         # Handle legacy 'with_references' parameter for backward compatibility
-        if params.prompt_type == PromptType.DEFAULT and params.with_references:
+        if params.prompt_type == QueryParam.PROMPT_DEFAULT and params.with_references:
             return "generate_response_query_with_references"
         
         # For custom prompts, use the provided key
-        if params.prompt_type == PromptType.CUSTOM:
+        if params.prompt_type == QueryParam.PROMPT_CUSTOM:
             if params.custom_prompt_key is None:
                 logger.warning("Custom prompt type selected but no custom_prompt_key provided. Using default prompt.")
                 return "generate_response_query_no_references"
@@ -246,12 +245,12 @@ class BaseGraphRAG(Generic[GTEmbedding, GTHash, GTChunk, GTNode, GTEdge, GTId]):
         
         # For predefined prompt types
         prompt_keys = {
-            PromptType.DEFAULT: "generate_response_query_no_references",
-            PromptType.WITH_REFERENCES: "generate_response_query_with_references",
-            PromptType.JSON: "generate_json_response_query",
-            PromptType.SCHEMA_JSON: "generate_schema_json_response_query",
-            PromptType.TABLE: "generate_table_response_query",
-            PromptType.BULLET_POINTS: "generate_bullet_points_response_query",
+            QueryParam.PROMPT_DEFAULT: "generate_response_query_no_references",
+            QueryParam.PROMPT_WITH_REFERENCES: "generate_response_query_with_references",
+            QueryParam.PROMPT_JSON: "generate_json_response_query",
+            QueryParam.PROMPT_SCHEMA_JSON: "generate_schema_json_response_query",
+            QueryParam.PROMPT_TABLE: "generate_table_response_query",
+            QueryParam.PROMPT_BULLET_POINTS: "generate_bullet_points_response_query",
         }
         
         # Return the appropriate prompt key, defaulting to the basic one if not found
