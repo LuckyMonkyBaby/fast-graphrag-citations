@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Generic, List, Optional, Tuple, Union
+from enum import Enum, auto
 
 from fast_graphrag._llm import BaseLLMService, format_and_send_prompt
 from fast_graphrag._llm._base import BaseEmbeddingService
@@ -21,6 +22,15 @@ class InsertParam:
     pass
 
 
+class PromptType(Enum):
+    DEFAULT = auto()                     # Default narrative response
+    WITH_REFERENCES = auto()             # Response with source references
+    JSON = auto()                        # JSON-formatted response
+    SCHEMA_JSON = auto()                 # JSON with specific schema
+    TABLE = auto()                       # Tabular format response
+    BULLET_POINTS = auto()               # Bullet point list response
+    CUSTOM = auto()                      # Custom pr
+
 @dataclass
 class QueryParam:
     with_references: bool = field(default=False)
@@ -28,6 +38,8 @@ class QueryParam:
     entities_max_tokens: int = field(default=4000)
     relations_max_tokens: int = field(default=3000)
     chunks_max_tokens: int = field(default=9000)
+    prompt_type: PromptType = field(default=PromptType.DEFAULT)
+    custom_prompt_key: Optional[str] = field(default=None) 
 
 
 @dataclass
@@ -172,6 +184,7 @@ class BaseGraphRAG(Generic[GTEmbedding, GTHash, GTChunk, GTNode, GTEdge, GTId]):
             return TQueryResponse[GTNode, GTEdge, GTHash, GTChunk](
                 response=PROMPTS["fail_response"], context=TContext([], [], [])
             )
+        
         if params is None:
             params = QueryParam()
 
@@ -187,7 +200,7 @@ class BaseGraphRAG(Generic[GTEmbedding, GTHash, GTChunk, GTNode, GTEdge, GTId]):
                 response=PROMPTS["fail_response"], context=TContext([], [], [])
             )
 
-        # Ask LLM
+        # Get context string with appropriate truncation
         context_str = context.truncate(
             max_chars={
                 "entities": params.entities_max_tokens * TOKEN_TO_CHAR_RATIO,
@@ -196,23 +209,53 @@ class BaseGraphRAG(Generic[GTEmbedding, GTHash, GTChunk, GTNode, GTEdge, GTId]):
             },
             output_context_str=not params.only_context
         )
+        
+        # Handle only_context case
         if params.only_context:
-            answer = ""
-        else:
-            llm_response, _ = await format_and_send_prompt(
-                prompt_key="generate_response_query_with_references"
-                if params.with_references
-                else "generate_response_query_no_references",
-                llm=self.llm_service,
-                format_kwargs={
-                    "query": query,
-                    "context": context_str
-                },
-                response_model=TAnswer,
-            )
-            answer = llm_response.answer
+            return TQueryResponse[GTNode, GTEdge, GTHash, GTChunk](response="", context=context)
+        
+        # Select the appropriate prompt based on prompt_type
+        prompt_key = self._get_prompt_key(params)
+        
+        # Send the prompt to the LLM
+        llm_response, _ = await format_and_send_prompt(
+            prompt_key=prompt_key,
+            llm=self.llm_service,
+            format_kwargs={
+                "query": query,
+                "context": context_str
+            },
+            response_model=TAnswer,
+        )
+        answer = llm_response.answer
 
         return TQueryResponse[GTNode, GTEdge, GTHash, GTChunk](response=answer, context=context)
+    
+    def _get_prompt_key(self, params: QueryParam) -> str:
+        """Determine which prompt key to use based on the query parameters."""
+        # Handle legacy 'with_references' parameter for backward compatibility
+        if params.prompt_type == PromptType.DEFAULT and params.with_references:
+            return "generate_response_query_with_references"
+        
+        # For custom prompts, use the provided key
+        if params.prompt_type == PromptType.CUSTOM:
+            if params.custom_prompt_key is None:
+                logger.warning("Custom prompt type selected but no custom_prompt_key provided. Using default prompt.")
+                return "generate_response_query_no_references"
+            return params.custom_prompt_key
+        
+        # For predefined prompt types
+        prompt_keys = {
+            PromptType.DEFAULT: "generate_response_query_no_references",
+            PromptType.WITH_REFERENCES: "generate_response_query_with_references",
+            PromptType.JSON: "generate_json_response_query",
+            PromptType.SCHEMA_JSON: "generate_schema_json_response_query",
+            PromptType.TABLE: "generate_table_response_query",
+            PromptType.BULLET_POINTS: "generate_bullet_points_response_query",
+        }
+        
+        # Return the appropriate prompt key, defaulting to the basic one if not found
+        return prompt_keys.get(params.prompt_type, "generate_response_query_no_references")
 
     def save_graphml(self, output_path: str) -> None:
         """Save the graph in GraphML format."""

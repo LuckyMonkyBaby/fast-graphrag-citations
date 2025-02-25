@@ -175,3 +175,216 @@ Answer:
 """
 
 PROMPTS["fail_response"] = "Sorry, I'm not able to provide an answer to that question."
+
+
+PROMPTS["generate_json_response_query"] = """You are a precise assistant analyzing input data to provide concise JSON responses to user queries.
+
+# INPUT DATA
+{context}
+
+# USER QUERY
+{query}
+
+# INSTRUCTIONS
+Your goal is to provide a short, structured JSON response to the user query using only relevant information from the input data:
+- The "Entities" and "Relationships" tables contain high-level information
+- The "Sources" list contains raw text sources with detailed information
+- Your output must be valid JSON with the exact structure shown below
+
+Follow these steps:
+1. Identify the core information needed to answer the query
+2. Extract only the most relevant facts from the sources
+3. Format your response as a concise JSON object with these fields:
+   - "answer": A short factual response (1-2 sentences maximum)
+   - "confidence": A number between 0-1 indicating your confidence level
+   - "entities": Array of key entity names referenced in your answer
+   - "source_ids": Array of source IDs that support your answer
+
+Output format:
+{
+  "answer": "Your concise factual response here",
+  "confidence": 0.95,
+  "entities": ["ENTITY1", "ENTITY2"],
+  "source_ids": ["source_1", "source_2"]
+}
+
+If no relevant information is found, return:
+{
+  "answer": "No relevant information found",
+  "confidence": 0,
+  "entities": [],
+  "source_ids": []
+}
+
+Response (valid JSON only):
+"""
+
+# Schema-based JSON response prompt
+PROMPTS["generate_schema_json_response_query"] = """You are a precise assistant analyzing input data to provide schema-compliant JSON responses to user queries.
+
+# INPUT DATA
+{context}
+
+# USER QUERY
+{query}
+
+# INSTRUCTIONS
+Your goal is to provide a structured JSON response to the user query using only relevant information from the input data:
+- The "Entities" and "Relationships" tables contain high-level information
+- The "Sources" list contains raw text sources with detailed information
+- Your output must be valid JSON conforming exactly to the schema specification below
+
+JSON SCHEMA:
+{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "The original user query"
+    },
+    "response": {
+      "type": "object",
+      "properties": {
+        "main_answer": {
+          "type": "string",
+          "description": "Direct factual answer to the query (1-3 sentences)"
+        },
+        "key_entities": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {"type": "string"},
+              "type": {"type": "string"},
+              "relevance": {"type": "number", "minimum": 0, "maximum": 1}
+            }
+          }
+        },
+        "key_relationships": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "source": {"type": "string"},
+              "target": {"type": "string"},
+              "description": {"type": "string"}
+            }
+          }
+        },
+        "supporting_evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "source_id": {"type": "string"},
+              "content_snippet": {"type": "string"},
+              "relevance": {"type": "number", "minimum": 0, "maximum": 1}
+            }
+          }
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Overall confidence in the answer"
+        }
+      },
+      "required": ["main_answer", "confidence"]
+    }
+  },
+  "required": ["query", "response"]
+}
+
+Follow these steps:
+1. Identify the core information needed to answer the query
+2. Extract only the most relevant facts from the sources
+3. Format your response as a valid JSON object that conforms exactly to the schema
+4. Ensure all required fields are present
+5. If no relevant information is found, set confidence to 0 and indicate this in main_answer
+
+Response (valid JSON only):
+"""
+
+# Table format response prompt
+PROMPTS["generate_table_response_query"] = """You are a helpful assistant analyzing input data to provide tabular responses to user queries.
+
+# INPUT DATA
+{context}
+
+# USER QUERY
+{query}
+
+# INSTRUCTIONS
+Your goal is to provide a tabular response to the user query using relevant information from the input data:
+- The "Entities" and "Relationships" tables contain high-level information
+- The "Sources" list contains raw text sources with detailed information
+
+Follow these steps:
+1. Assess whether the query is best answered with a table format
+2. Identify the key columns that would structure the answer effectively
+3. Extract relevant information from sources to populate the table
+4. Format your response as a markdown table with appropriate headers
+5. Include a brief 1-2 sentence introduction before the table
+6. Add a short conclusion after the table if necessary
+
+For example:
+
+Here is a summary of the key climate factors affecting sea levels:
+
+| Factor | Impact Level | Mechanism | Time Scale |
+|--------|--------------|-----------|------------|
+| Thermal Expansion | High | Ocean water expands as it warms | Decades |
+| Glacier Melting | Medium | Mountain glaciers add water to oceans | Years to decades |
+| Ice Sheet Loss | Very High | Greenland and Antarctic ice sheets melt | Decades to centuries |
+| Land Water Storage | Low | Changes in terrestrial water storage | Variable |
+
+These factors combine to create the current rate of sea level rise of approximately 3.6mm per year.
+
+If a table format is not appropriate for the query, provide a concise paragraph response instead.
+
+Response:
+"""
+
+# Bullet point response prompt
+PROMPTS["generate_bullet_points_response_query"] = """You are a helpful assistant analyzing input data to provide organized bullet point responses to user queries.
+
+# INPUT DATA
+{context}
+
+# USER QUERY
+{query}
+
+# INSTRUCTIONS
+Your goal is to provide a clear, structured bullet point response to the user query using relevant information from the input data:
+- The "Entities" and "Relationships" tables contain high-level information
+- The "Sources" list contains raw text sources with detailed information
+
+Follow these steps:
+1. Identify the key points that address the user's query
+2. Organize these points in a logical hierarchy (main points and sub-points)
+3. Format your response as bullet points using markdown syntax
+4. Begin with a brief 1-2 sentence introduction
+5. Group related points under clear headings if helpful
+6. End with a short conclusion if appropriate
+
+Example format:
+
+Based on the available information, here are the key factors affecting ocean acidification:
+
+**Primary Causes:**
+* Increased atmospheric CO2 levels
+  * Human CO2 emissions from fossil fuels
+  * Deforestation reducing CO2 absorption
+* Changes in ocean circulation patterns
+  * Warming-induced stratification
+  * Altered upwelling patterns
+
+**Major Impacts:**
+* Reduced calcification in marine organisms
+* Ecosystem disruption
+* Food web alterations
+
+The most significant factor is atmospheric CO2 absorption, accounting for approximately 80% of ocean acidification.
+
+Response:
+"""
