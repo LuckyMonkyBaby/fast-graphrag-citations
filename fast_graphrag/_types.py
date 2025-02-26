@@ -85,22 +85,15 @@ class TCitation:
     sentence_scores: Dict[int, float] = field(default_factory=dict)
     
     def get_most_relevant_sentence(self, content: str) -> Optional[str]:
-        """Get the most relevant sentence based on scores"""
         if not self.sentence_scores or not self.sentence_offsets:
-            return None
-            
-        # Find the sentence with the highest score
-        if not self.sentence_scores:
             return None
             
         max_score_idx = max(self.sentence_scores.items(), key=lambda x: x[1])[0]
         if max_score_idx < len(self.sentence_offsets):
             start, end = self.sentence_offsets[max_score_idx]
-            # Adjust offsets relative to the content
-            rel_start = max(0, start - self.start_offset)
-            rel_end = min(len(content), end - self.start_offset)
-            if rel_start < rel_end and rel_end <= len(content):
-                return content[rel_start:rel_end]
+            # Use offsets directly within the content
+            if 0 <= start < end <= len(content):
+                return content[start:end]
         return None
 
     def get_all_sentences(self, content: str) -> List[str]:

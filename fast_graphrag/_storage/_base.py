@@ -17,7 +17,7 @@ from typing import (
 
 from scipy.sparse import csr_matrix  # type: ignore
 
-from fast_graphrag._types import GTBlob, GTEdge, GTEmbedding, GTId, GTKey, GTNode, GTValue, TIndex, TScore, TCitation
+from fast_graphrag._types import GTBlob, GTEdge, GTEmbedding, GTId, GTKey, GTNode, GTValue, TIndex, TScore
 from fast_graphrag._utils import logger
 
 from ._namespace import Namespace
