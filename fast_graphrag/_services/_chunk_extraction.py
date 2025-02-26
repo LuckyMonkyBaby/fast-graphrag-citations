@@ -71,6 +71,9 @@ class DefaultChunkingService(BaseChunkingService[TChunk]):
             data.data = re.sub(r"[\x00-\x09\x11-\x12\x14-\x1f]", " ", data.data)
 
         if len(data.data) <= self._chunk_size:
+            # Extract sentence offsets for the document
+            sentence_offsets = self._extract_sentence_offsets(data.data)
+            
             # For single chunk, use entire document range
             return [
                 TChunk(
@@ -80,6 +83,7 @@ class DefaultChunkingService(BaseChunkingService[TChunk]):
                     citation=TCitation(
                         start_offset=0,
                         end_offset=len(data.data),
+                        sentence_offsets=sentence_offsets,
                     )
                 )
             ]
@@ -94,10 +98,34 @@ class DefaultChunkingService(BaseChunkingService[TChunk]):
                     citation=TCitation(
                         start_offset=start_offset,
                         end_offset=end_offset,
+                        sentence_offsets=self._extract_sentence_offsets_with_base(chunk, start_offset),
                     )
                 )
                 for chunk, start_offset, end_offset in chunks_with_offsets
             ]
+
+    def _extract_sentence_offsets(self, text: str) -> List[Tuple[int, int]]:
+        """Extract sentence boundary offsets from text."""
+        offsets: List[Tuple[int, int]] = []
+        start = 0
+        
+        # Use the existing separator pattern
+        for match in self._split_re.finditer(text):
+            end = match.end()
+            if end > start:  # Skip empty sentences
+                offsets.append((start, end))
+            start = end
+        
+        # Add any remaining text as a final sentence
+        if start < len(text):
+            offsets.append((start, len(text)))
+            
+        return offsets
+
+    def _extract_sentence_offsets_with_base(self, text: str, base_offset: int) -> List[Tuple[int, int]]:
+        """Extract sentence offsets with adjustment for base offset."""
+        offsets = self._extract_sentence_offsets(text)
+        return [(base_offset + start, base_offset + end) for start, end in offsets]
 
     def _split_text_with_offsets(self, text: str) -> List[Tuple[str, int, int]]:
         """Split text and track original character offsets."""

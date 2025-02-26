@@ -8,6 +8,8 @@ import numpy.typing as npt
 from pydantic import Field, field_validator
 
 from ._models import BaseModelAlias, dump_to_csv, dump_to_reference_list
+# Import removed as it's unused and causing an error
+# from _services._scoring_utils import score_sentences_in_chunk
 
 ####################################################################################################
 # GENERICS
@@ -71,6 +73,52 @@ class BTEdge(TSerializable):
 
 GTEdge = TypeVar("GTEdge", bound=BTEdge)
 
+@dataclass
+class TCitation:
+    """Citation with sentence-level granularity"""
+    # Original document offsets
+    start_offset: int
+    end_offset: int
+    # List of (start, end) offsets for sentences within the citation
+    sentence_offsets: List[Tuple[int, int]] = field(default_factory=list)
+    # Relevance scores for each sentence (populated at retrieval time)
+    sentence_scores: Dict[int, float] = field(default_factory=dict)
+    
+    def get_most_relevant_sentence(self, content: str) -> Optional[str]:
+        """Get the most relevant sentence based on scores"""
+        if not self.sentence_scores or not self.sentence_offsets:
+            return None
+            
+        # Find the sentence with the highest score
+        if not self.sentence_scores:
+            return None
+            
+        max_score_idx = max(self.sentence_scores.items(), key=lambda x: x[1])[0]
+        if max_score_idx < len(self.sentence_offsets):
+            start, end = self.sentence_offsets[max_score_idx]
+            # Adjust offsets relative to the content
+            rel_start = max(0, start - self.start_offset)
+            rel_end = min(len(content), end - self.start_offset)
+            if rel_start < rel_end and rel_end <= len(content):
+                return content[rel_start:rel_end]
+        return None
+
+    def get_all_sentences(self, content: str) -> List[str]:
+        """Get all sentences with their scores."""
+        sentences: List[Tuple[str, float]] = []
+        for i, (start, end) in enumerate(self.sentence_offsets):
+            # Adjust offsets relative to the content
+            rel_start = max(0, start - self.start_offset)
+            rel_end = min(len(content), end - self.start_offset)
+            
+            if rel_start < rel_end and rel_end <= len(content):
+                score = self.sentence_scores.get(i, 0.0)
+                sentences.append((content[rel_start:rel_end], score))
+        
+        # Sort by score (highest first)
+        sentences.sort(key=lambda x: x[1], reverse=True)
+        return [s[0] for s in sentences]
+
 
 @dataclass
 class BTChunk(TSerializable):
@@ -92,11 +140,6 @@ THash: TypeAlias = np.uint64
 TScore: TypeAlias = np.float32
 TIndex: TypeAlias = int
 TId: TypeAlias = str
-
-@dataclass
-class TCitation:
-    start_offset: int
-    end_offset: int
 
 @dataclass
 class TDocument:
@@ -255,23 +298,64 @@ class TContext(Generic[GTNode, GTEdge, GTHash, GTChunk]):
     relations: List[Tuple[GTEdge, TScore]] = field()
     chunks: List[Tuple[GTChunk, TScore]] = field()
 
-    def truncate(self, max_chars: Dict[str, int], output_context_str: bool = False) -> str:
-        """Genearate a tabular representation of the context.
+    def truncate(self, max_chars: Dict[str, int], output_context_str: bool = False, query: Optional[str] = None) -> str:
+        """Generate a tabular representation of the context with optional sentence highlighting.
 
-        Truncate the tables to the maximum number of assigned tokens.
+        Args:
+            max_chars: Maximum characters for each context element.
+            output_context_str: Whether to generate a context string.
+            query: Optional query to use for sentence highlighting.
+
+        Returns:
+            A string representation of the context.
         """
+        # Score sentences if query is provided
+        if query:
+            # Import here to avoid circular imports
+            from fast_graphrag._services._scoring_utils import score_sentences_in_chunk
+            
+            # Score sentences in each chunk using regular for loop
+            for chunk_tuple in self.chunks:
+                chunk = chunk_tuple[0]  # Get the chunk from the tuple
+                if isinstance(chunk, TChunk) and chunk.citation is not None:
+                    score_sentences_in_chunk(chunk, query)
+        
         csv_tables: Dict[str, List[str]] = {
             "entities": dump_to_csv([e for e, _ in self.entities], ["name", "description"], with_header=True),
             "relations": dump_to_csv(
                 [r for r, _ in self.relations], ["source", "target", "description"], with_header=True
             ),
-            "chunks": dump_to_reference_list([str(c) for c, _ in self.chunks]),
         }
+        
+        # For chunks, use highlighted sentences if query is provided
+        if query:
+            chunk_entries: List[str] = []
+            for i, (chunk, _) in enumerate(self.chunks):
+                # Get the chunk with proper type checking
+                if isinstance(chunk, TChunk):
+                    if chunk.citation is not None:
+                        best_sentence = chunk.citation.get_most_relevant_sentence(chunk.content)
+                        if best_sentence:
+                            # Format with reference number and sentence
+                            chunk_entries.append(f"[{i+1}] {best_sentence.strip()}")
+                            continue
+                
+                # Fallback to showing the entire chunk with reference number
+                chunk_entries.append(f"[{i+1}] {str(chunk)}")
+            
+            csv_tables["chunks"] = chunk_entries
+        else:
+            # Use original reference list format
+            csv_tables["chunks"] = dump_to_reference_list([str(c) for c, _ in self.chunks])
+        
+        # Calculate row lengths
         csv_tables_row_length = {k: [len(row) for row in table] for k, table in csv_tables.items()}
 
         # Truncate each csv to the maximum number of assigned tokens
         included_up_to = {key: 0 for key in ["entities", "relations", "chunks"]}
         chars_remainder = 0
+        
+        # Truncation logic
         while True:
             last_char_remainder = chars_remainder
             # Keep augmenting the context until feasible
@@ -331,9 +415,17 @@ class TContext(Generic[GTNode, GTEdge, GTHash, GTChunk]):
                 context.append("\n## Relationships: Not provided\n")
 
             if len(self.chunks):
-                context.extend(["\n## Sources\n", *csv_tables["chunks"][: included_up_to["chunks"]], ""])
+                if query:
+                    # For highlighted sentences, use a more readable format
+                    context.extend(["\n## Relevant Sentences\n"])
+                    context.extend(csv_tables["chunks"][: included_up_to["chunks"]])
+                    context.append("")
+                else:
+                    # Use original format for non-highlighted chunks
+                    context.extend(["\n## Sources\n", *csv_tables["chunks"][: included_up_to["chunks"]], ""])
             else:
                 context.append("\n## Sources: Not provided\n")
+                
         return "\n".join(context)
 
 
@@ -404,7 +496,7 @@ class TQueryResponse(Generic[GTNode, GTEdge, GTHash, GTChunk]):
 
         def to_dict(self):
             return {doc.index: doc.to_dict() for doc in self.documents.values() if doc.index is not None}
-
+        
     def format_references(self, format_fn: Callable[[int, List[int], Any], str] = lambda i, _, __: f"[{i}]"):
         # Create list of documents
         reference_list = self._ReferenceList()
