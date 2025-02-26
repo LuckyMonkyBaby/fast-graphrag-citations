@@ -13,6 +13,31 @@ from fast_graphrag._types import (
 from fast_graphrag._utils import TOKEN_TO_CHAR_RATIO
 from ._base import BaseChunkingService
 
+def extract_sentences(text: str) -> List[str]:
+    # Generalized sentence extraction with robust rules
+    sentences: List[str] = []
+    
+    # Split on periods, but handle special cases
+    potential_sentences = re.split(r'(?<!\w\.\w.)(?<=\.)\s+', text)
+    
+    for sentence in potential_sentences:
+        # Filter out very short fragments and purely numeric lines
+        sentence_words = sentence.split()
+        
+        # Criteria for a valid sentence:
+        # 1. More than 3 words
+        # 2. Less than 50 words (typical sentence length)
+        # 3. Not purely numeric
+        # 4. Not just a single letter or symbol
+        if (len(sentence_words) > 3 and 
+            len(sentence_words) < 50 and 
+            not re.match(r'^[\d\s$.,()%]+$', sentence) and
+            not re.match(r'^[A-Z]\s*$', sentence)):
+            sentences.append(sentence.strip())
+    
+    return sentences
+
+# Existing default separators
 DEFAULT_SEPARATORS = [
     # Paragraph and page separators
     "\n\n\n",
@@ -107,19 +132,33 @@ class DefaultChunkingService(BaseChunkingService[TChunk]):
     def _extract_sentence_offsets(self, text: str) -> List[Tuple[int, int]]:
         """Extract sentence boundary offsets from text."""
         offsets: List[Tuple[int, int]] = []
-        start = 0
-        
-        # Use the existing separator pattern
-        for match in self._split_re.finditer(text):
-            end = match.end()
-            if end > start:  # Skip empty sentences
+        current_pos = 0
+
+        # Use our custom sentence extraction function
+        sentences = extract_sentences(text)
+
+        for sentence in sentences:
+            # Find the start and end of each sentence in the original text
+            start = text.find(sentence, current_pos)
+            if start != -1:
+                end = start + len(sentence)
                 offsets.append((start, end))
-            start = end
-        
-        # Add any remaining text as a final sentence
-        if start < len(text):
-            offsets.append((start, len(text)))
+                current_pos = end
+
+        # Fallback to splitting by separators if no sentences found
+        if not offsets:
+            # Fallback to original separator-based method
+            current_pos = 0
+            for match in self._split_re.finditer(text):
+                end = match.end()
+                if end > current_pos:  # Skip empty sentences
+                    offsets.append((current_pos, end))
+                current_pos = end
             
+            # Add any remaining text as a final sentence
+            if current_pos < len(text):
+                offsets.append((current_pos, len(text)))
+
         return offsets
 
     def _extract_sentence_offsets_with_base(self, text: str, base_offset: int) -> List[Tuple[int, int]]:
