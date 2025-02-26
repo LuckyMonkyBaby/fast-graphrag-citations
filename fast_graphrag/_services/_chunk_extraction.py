@@ -12,30 +12,14 @@ from fast_graphrag._types import (
 )
 from fast_graphrag._utils import TOKEN_TO_CHAR_RATIO
 from ._base import BaseChunkingService
+import spacy
+
+nlp = spacy.load("en_core_web_sm")
 
 def extract_sentences(text: str) -> List[str]:
-    # Generalized sentence extraction with robust rules
-    sentences: List[str] = []
-    
-    # Split on periods, but handle special cases
-    potential_sentences = re.split(r'(?<!\w\.\w.)(?<=\.)\s+', text)
-    
-    for sentence in potential_sentences:
-        # Filter out very short fragments and purely numeric lines
-        sentence_words = sentence.split()
-        
-        # Criteria for a valid sentence:
-        # 1. More than 3 words
-        # 2. Less than 50 words (typical sentence length)
-        # 3. Not purely numeric
-        # 4. Not just a single letter or symbol
-        if (len(sentence_words) > 3 and 
-            len(sentence_words) < 50 and 
-            not re.match(r'^[\d\s$.,()%]+$', sentence) and
-            not re.match(r'^[A-Z]\s*$', sentence)):
-            sentences.append(sentence.strip())
-    
-    return sentences
+    """Extracts sentences using spaCy NLP."""
+    doc = nlp(text)
+    return [sent.text.strip() for sent in doc.sents if len(sent.text.strip()) > 0]
 
 # Existing default separators
 DEFAULT_SEPARATORS = [
@@ -87,13 +71,8 @@ class DefaultChunkingService(BaseChunkingService[TChunk]):
         return chunks_per_data
 
     async def _extract_chunks(self, data: TDocument) -> List[TChunk]:
-        """Extract chunks from a document while tracking offsets."""
         # Sanitise input data:
-        try:
-            data.data = data.data.encode(errors="replace").decode()
-        except UnicodeDecodeError:
-            # Default to replacing all unrecognised characters with a space
-            data.data = re.sub(r"[\x00-\x09\x11-\x12\x14-\x1f]", " ", data.data)
+        data.data = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", data.data)
 
         if len(data.data) <= self._chunk_size:
             # Extract sentence offsets for the document
@@ -130,34 +109,19 @@ class DefaultChunkingService(BaseChunkingService[TChunk]):
             ]
 
     def _extract_sentence_offsets(self, text: str) -> List[Tuple[int, int]]:
-        """Extract sentence boundary offsets from text."""
+        """Extract sentence offsets using regex search for better accuracy."""
         offsets: List[Tuple[int, int]] = []
         current_pos = 0
-
-        # Use our custom sentence extraction function
-        sentences = extract_sentences(text)
+        
+        sentences = extract_sentences(text)  # Get properly segmented sentences
 
         for sentence in sentences:
-            # Find the start and end of each sentence in the original text
-            start = text.find(sentence, current_pos)
-            if start != -1:
+            match = re.search(re.escape(sentence), text[current_pos:])
+            if match:
+                start = current_pos + match.start()
                 end = start + len(sentence)
                 offsets.append((start, end))
-                current_pos = end
-
-        # Fallback to splitting by separators if no sentences found
-        if not offsets:
-            # Fallback to original separator-based method
-            current_pos = 0
-            for match in self._split_re.finditer(text):
-                end = match.end()
-                if end > current_pos:  # Skip empty sentences
-                    offsets.append((current_pos, end))
-                current_pos = end
-            
-            # Add any remaining text as a final sentence
-            if current_pos < len(text):
-                offsets.append((current_pos, len(text)))
+                current_pos = end  # Move forward to avoid duplicate matches
 
         return offsets
 
@@ -167,27 +131,20 @@ class DefaultChunkingService(BaseChunkingService[TChunk]):
         return [(base_offset + start, base_offset + end) for start, end in offsets]
 
     def _split_text_with_offsets(self, text: str) -> List[Tuple[str, int, int]]:
-        """Split text and track original character offsets."""
+        """Split text into chunks while preserving sentence offsets."""
+        sentences = extract_sentences(text)
+        
         splits_with_offsets: List[Tuple[str, int, int]] = []
         current_offset = 0
-        
-        # Split text and keep track of separator positions
-        parts = self._split_re.split(text)
-        
-        for i, part in enumerate(parts):
-            if not part:  # Skip empty parts
-                continue
-                
-            # If it's a separator (odd indices), just update offset
-            if i % 2 == 1:
-                current_offset += len(part)
-                continue
-                
-            # For content parts, track the offsets
-            splits_with_offsets.append((part, current_offset, current_offset + len(part)))
-            current_offset += len(part)
-            
-        return self._merge_splits_with_offsets(splits_with_offsets)
+
+        for sentence in sentences:
+            start = text.find(sentence, current_offset)
+            if start != -1:
+                end = start + len(sentence)
+                splits_with_offsets.append((sentence, start, end))
+                current_offset = end  # Move forward
+
+        return splits_with_offsets
 
     def _merge_splits_with_offsets(
         self, 
