@@ -34,14 +34,12 @@ class QueryParam:
     
     with_references: bool = field(default=False)
     only_context: bool = field(default=False)
-    use_sentence_citations: bool = field(default=True)
     entities_max_tokens: int = field(default=4000)
     relations_max_tokens: int = field(default=3000)
     chunks_max_tokens: int = field(default=9000)
     prompt_type: str = field(default=PROMPT_DEFAULT)
     custom_prompt_key: Optional[str] = field(default=None)
-    max_sentences_per_chunk: int = field(default=3)
-    highlight_query_terms: bool = field(default=True)
+    include_sub_chunks: bool = field(default=True) 
 
 
 @dataclass
@@ -202,9 +200,6 @@ class BaseGraphRAG(Generic[GTEmbedding, GTHash, GTChunk, GTNode, GTEdge, GTId]):
                 response=PROMPTS["fail_response"], context=TContext([], [], [])
             )
 
-        # Determine whether to use query for sentence highlighting
-        query_for_context = query if params.use_sentence_citations else None
-        
         # Get context string with appropriate truncation
         context_str = context.truncate(
             max_chars={
@@ -212,8 +207,7 @@ class BaseGraphRAG(Generic[GTEmbedding, GTHash, GTChunk, GTNode, GTEdge, GTId]):
                 "relations": params.relations_max_tokens * TOKEN_TO_CHAR_RATIO,
                 "chunks": params.chunks_max_tokens * TOKEN_TO_CHAR_RATIO,
             },
-            output_context_str=not params.only_context,
-            query=query_for_context
+            output_context_str=not params.only_context
         )
         
         # Handle only_context case
@@ -235,15 +229,7 @@ class BaseGraphRAG(Generic[GTEmbedding, GTHash, GTChunk, GTNode, GTEdge, GTId]):
         )
         answer = llm_response.answer
 
-        # Create response with reference formatting if needed
-        response = TQueryResponse[GTNode, GTEdge, GTHash, GTChunk](response=answer, context=context)
-        
-        # Apply sentence-level citations in references if specified
-        if params.with_references and params.use_sentence_citations:
-            # The formatting will be applied when format_references is called
-            pass
-            
-        return response
+        return TQueryResponse[GTNode, GTEdge, GTHash, GTChunk](response=answer, context=context)
     
     def _get_prompt_key(self, params: QueryParam) -> str:
         """Determine which prompt key to use based on the query parameters."""

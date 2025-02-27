@@ -218,7 +218,7 @@ class DefaultStateManagerService(BaseStateManagerService[TEntity, TRelation, THa
         # Score entities
         try:
             graph_entity_scores = self.entity_ranking_policy(
-                await self._score_entities_by_graph(entity_scores=vdb_entity_scores)
+                await self._score_entities_by_graph(entity_scores=vdb_entity_scores.tocsr())
             )
         except Exception as e:
             logger.error(f"Error during graph scoring for entities. Non-zero elements: {vdb_entity_scores.nnz}.\n{e}")
@@ -255,7 +255,75 @@ class DefaultStateManagerService(BaseStateManagerService[TEntity, TRelation, THa
                 if chunk is not None:
                     relevant_chunks.append((chunk, s))
 
-            return TContext(entities=relevant_entities, relations=relevant_relationships, chunks=relevant_chunks)
+            # Create context with empty used_sub_chunks dictionary
+            context = TContext[TEntity, TRelation, THash, TChunk](
+                entities=relevant_entities,
+                relations=relevant_relationships,
+                chunks=relevant_chunks,
+                used_sub_chunks={}
+            )
+            
+            # Track which sub-chunks are used for each entity's citations
+            for entity, _ in relevant_entities:
+                if hasattr(entity, "citations") and entity.citations:
+                    for citation in entity.citations:
+                        for chunk, _ in relevant_chunks:
+                            if not hasattr(chunk, "citation") or not chunk.citation:
+                                continue
+                                
+                            # Check if this citation falls within this chunk
+                            if (citation.start_offset >= chunk.citation.start_offset and 
+                                citation.end_offset <= chunk.citation.end_offset):
+                                
+                                # Find sub-chunks that overlap with this citation
+                                if hasattr(chunk, "sub_chunks") and chunk.sub_chunks:
+                                    overlapping_indices: List[int] = []
+                                    for i, sub in enumerate(chunk.sub_chunks):
+                                        if (sub.start_offset <= citation.end_offset and 
+                                            sub.end_offset >= citation.start_offset):
+                                            overlapping_indices.append(i)
+                                    
+                                    # Store in context.used_sub_chunks
+                                    if overlapping_indices:
+                                        if chunk.id not in context.used_sub_chunks:
+                                            context.used_sub_chunks[chunk.id] = []
+                                        
+                                        # Add any new sub-chunks
+                                        for idx in overlapping_indices:
+                                            if idx not in context.used_sub_chunks[chunk.id]:
+                                                context.used_sub_chunks[chunk.id].append(idx)
+
+            # Do the same for relations
+            for relation, _ in relevant_relationships:
+                if hasattr(relation, "citations") and relation.citations:
+                    for citation in relation.citations:
+                        for chunk, _ in relevant_chunks:
+                            if not hasattr(chunk, "citation") or not chunk.citation:
+                                continue
+                                
+                            # Check if this citation falls within this chunk
+                            if (citation.start_offset >= chunk.citation.start_offset and 
+                                citation.end_offset <= chunk.citation.end_offset):
+                                
+                                # Find sub-chunks that overlap with this citation
+                                if hasattr(chunk, "sub_chunks") and chunk.sub_chunks:
+                                    overlapping_indices = []
+                                    for i, sub in enumerate(chunk.sub_chunks):
+                                        if (sub.start_offset <= citation.end_offset and 
+                                            sub.end_offset >= citation.start_offset):
+                                            overlapping_indices.append(i)
+                                    
+                                    # Store in context.used_sub_chunks
+                                    if overlapping_indices:
+                                        if chunk.id not in context.used_sub_chunks:
+                                            context.used_sub_chunks[chunk.id] = []
+                                        
+                                        # Add any new sub-chunks
+                                        for idx in overlapping_indices:
+                                            if idx not in context.used_sub_chunks[chunk.id]:
+                                                context.used_sub_chunks[chunk.id].append(idx)
+            
+            return context
         except Exception as e:
             logger.error(f"Error during scoring of chunks and relationships.\n{e}")
             raise e

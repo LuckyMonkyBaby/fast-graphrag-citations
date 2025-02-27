@@ -8,13 +8,11 @@ from fast_graphrag._types import (
     TChunk, 
     TDocument, 
     THash,
-    TCitation
+    TCitation,
+    SubChunk  # Import TCitation from types
 )
 from fast_graphrag._utils import TOKEN_TO_CHAR_RATIO
 from ._base import BaseChunkingService
-
-# Regex pattern for detecting sentence boundaries
-SENTENCE_PATTERN = r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|\!|\。|\？|\！|\．)(\s+|$)'
 
 DEFAULT_SEPARATORS = [
     # Paragraph and page separators
@@ -31,55 +29,12 @@ DEFAULT_SEPARATORS = [
     "?",  # English question mark
 ]
 
-def find_sentence_boundaries(text: str) -> List[Tuple[int, int]]:
-    """
-    Find the start and end offsets of all sentences in the text using regex.
-    
-    Args:
-        text: The text to analyze
-        
-    Returns:
-        A list of (start, end) tuples for each sentence
-    """
-    sentence_offsets: List[Tuple[int, int]] = []
-    current_pos = 0
-    
-    # Split the text into sentences using regex
-    sentence_boundaries = list(re.finditer(SENTENCE_PATTERN, text))
-    
-    if not sentence_boundaries:
-        # If no sentence boundaries found, treat the whole text as one sentence
-        if text.strip():
-            return [(0, len(text))]
-        return []
-    
-    # Process each sentence
-    for i in range(len(sentence_boundaries)):
-        # Get the sentence text including the ending punctuation
-        if i < len(sentence_boundaries) - 1:
-            next_start = sentence_boundaries[i+1].start()
-            sentence_end = next_start
-        else:
-            sentence_end = len(text)
-        
-        # If there's content between current_pos and the sentence end
-        if current_pos < sentence_end and text[current_pos:sentence_end].strip():
-            sentence_offsets.append((current_pos, sentence_end))
-        
-        # Move to the position after this sentence boundary
-        current_pos = sentence_boundaries[i].end()
-    
-    # Handle any remaining text after the last boundary
-    if current_pos < len(text) and text[current_pos:].strip():
-        sentence_offsets.append((current_pos, len(text)))
-    
-    return sentence_offsets
-
 @dataclass
 class DefaultChunkingServiceConfig:
     separators: List[str] = field(default_factory=lambda: DEFAULT_SEPARATORS)
     chunk_token_size: int = field(default=800)
     chunk_token_overlap: int = field(default=100)
+    sub_chunk_count: int = field(default=8)  # Add this field
 
 @dataclass
 class DefaultChunkingService(BaseChunkingService[TChunk]):
@@ -91,6 +46,7 @@ class DefaultChunkingService(BaseChunkingService[TChunk]):
         self._split_re = re.compile(f"({'|'.join(re.escape(s) for s in self.config.separators or [])})")
         self._chunk_size = self.config.chunk_token_size * TOKEN_TO_CHAR_RATIO
         self._chunk_overlap = self.config.chunk_token_overlap * TOKEN_TO_CHAR_RATIO
+        self._sub_chunk_count = self.config.sub_chunk_count
 
     async def extract(self, data: Iterable[TDocument]) -> Iterable[Iterable[TChunk]]:
         """Extract unique chunks from the given data."""
@@ -118,26 +74,23 @@ class DefaultChunkingService(BaseChunkingService[TChunk]):
             data.data = re.sub(r"[\x00-\x09\x11-\x12\x14-\x1f]", " ", data.data)
 
         if len(data.data) <= self._chunk_size:
-            # Find sentence boundaries in the whole document
-            sentence_offsets = find_sentence_boundaries(data.data)
-            
             # For single chunk, use entire document range
-            return [
-                TChunk(
+            chunk = TChunk(
                     id=THash(xxhash.xxh3_64_intdigest(data.data)),
                     content=data.data,
                     metadata=data.metadata,
                     citation=TCitation(
                         start_offset=0,
                         end_offset=len(data.data),
-                        sentence_offsets=sentence_offsets,
                     )
                 )
-            ]
+            self._create_sub_chunks(chunk)
+
+            return [chunk]
         else:
             # Split text and track offsets
             chunks_with_offsets = self._split_text_with_offsets(data.data)
-            return [
+            chunks = [
                 TChunk(
                     id=THash(xxhash.xxh3_64_intdigest(chunk)),
                     content=chunk,
@@ -145,29 +98,14 @@ class DefaultChunkingService(BaseChunkingService[TChunk]):
                     citation=TCitation(
                         start_offset=start_offset,
                         end_offset=end_offset,
-                        sentence_offsets=self._get_sentence_offsets_with_base(chunk, start_offset),
                     )
                 )
                 for chunk, start_offset, end_offset in chunks_with_offsets
             ]
+            for chunk in chunks:
+                self._create_sub_chunks(chunk)
 
-    def _get_sentence_offsets_with_base(self, text: str, base_offset: int) -> List[Tuple[int, int]]:
-        """
-        Get sentence offsets within a chunk, adjusted for the chunk's base offset.
-        
-        Args:
-            text: The chunk text
-            base_offset: The offset of the chunk in the original document
-            
-        Returns:
-            A list of sentence (start, end) offsets adjusted to the original document
-        """
-        # Find sentence boundaries within this chunk
-        sentence_offsets: List[Tuple[int, int]] = find_sentence_boundaries(text)
-        
-        # Adjust offsets relative to the original document
-        result: List[Tuple[int, int]] = [(start + base_offset, end + base_offset) for start, end in sentence_offsets]
-        return result
+            return chunks
 
     def _split_text_with_offsets(self, text: str) -> List[Tuple[str, int, int]]:
         """Split text and track original character offsets."""
@@ -258,3 +196,30 @@ class DefaultChunkingService(BaseChunkingService[TChunk]):
                 result.append((new_chunk, new_start, end_offset))
         
         return result
+    
+    def _create_sub_chunks(self, chunk: TChunk) -> None:
+        """Create sub-chunks for a given chunk."""
+        if not chunk.citation:
+            return
+            
+        content = chunk.content
+        base_offset = chunk.citation.start_offset
+        
+        # Calculate sub-chunk size
+        sub_chunk_size = max(1, len(content) // self._sub_chunk_count)
+        
+        for i in range(self._sub_chunk_count):
+            start_idx = i * sub_chunk_size
+            end_idx = (i + 1) * sub_chunk_size if i < self._sub_chunk_count - 1 else len(content)
+            
+            if start_idx >= len(content):
+                break
+                
+            sub_chunk = SubChunk(
+                index=i,
+                start_offset=base_offset + start_idx,
+                end_offset=base_offset + end_idx,
+                content=content[start_idx:end_idx]
+            )
+            
+            chunk.sub_chunks.append(sub_chunk)

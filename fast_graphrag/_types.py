@@ -8,8 +8,6 @@ import numpy.typing as npt
 from pydantic import Field, field_validator
 
 from ._models import BaseModelAlias, dump_to_csv, dump_to_reference_list
-# Import removed as it's unused and causing an error
-# from _services._scoring_utils import score_sentences_in_chunk
 
 ####################################################################################################
 # GENERICS
@@ -73,45 +71,6 @@ class BTEdge(TSerializable):
 
 GTEdge = TypeVar("GTEdge", bound=BTEdge)
 
-@dataclass
-class TCitation:
-    """Citation with sentence-level granularity"""
-    # Original document offsets
-    start_offset: int
-    end_offset: int
-    # List of (start, end) offsets for sentences within the citation
-    sentence_offsets: List[Tuple[int, int]] = field(default_factory=list)
-    # Relevance scores for each sentence (populated at retrieval time)
-    sentence_scores: Dict[int, float] = field(default_factory=dict)
-    
-    def get_most_relevant_sentence(self, content: str) -> Optional[str]:
-        if not self.sentence_scores or not self.sentence_offsets:
-            return None
-            
-        max_score_idx = max(self.sentence_scores.items(), key=lambda x: x[1])[0]
-        if max_score_idx < len(self.sentence_offsets):
-            start, end = self.sentence_offsets[max_score_idx]
-            # Use offsets directly within the content
-            if 0 <= start < end <= len(content):
-                return content[start:end]
-        return None
-
-    def get_all_sentences(self, content: str) -> List[str]:
-        """Get all sentences with their scores."""
-        sentences: List[Tuple[str, float]] = []
-        for i, (start, end) in enumerate(self.sentence_offsets):
-            # Adjust offsets relative to the content
-            rel_start = max(0, start - self.start_offset)
-            rel_end = min(len(content), end - self.start_offset)
-            
-            if rel_start < rel_end and rel_end <= len(content):
-                score = self.sentence_scores.get(i, 0.0)
-                sentences.append((content[rel_start:rel_end], score))
-        
-        # Sort by score (highest first)
-        sentences.sort(key=lambda x: x[1], reverse=True)
-        return [s[0] for s in sentences]
-
 
 @dataclass
 class BTChunk(TSerializable):
@@ -135,6 +94,33 @@ TIndex: TypeAlias = int
 TId: TypeAlias = str
 
 @dataclass
+class TCitation:
+    start_offset: int
+    end_offset: int
+
+    def overlaps_with(self, other: 'TCitation') -> bool:
+        """Check if this citation overlaps with another citation."""
+        return (self.start_offset <= other.end_offset and 
+                self.end_offset >= other.start_offset)
+
+@dataclass
+class SubChunk:
+    """Represents a sub-division of a larger chunk for more precise citations."""
+    index: int  # Index within the parent chunk (0-based)
+    start_offset: int  # Character offset from start of document
+    end_offset: int  # Character offset from start of document
+    content: str  # The actual text content
+    
+    def get_citation(self) -> TCitation:
+        """Get a citation for this sub-chunk."""
+        return TCitation(start_offset=self.start_offset, end_offset=self.end_offset)
+    
+    def overlaps_with_citation(self, citation: TCitation) -> bool:
+        """Check if this sub-chunk overlaps with a citation."""
+        return (self.start_offset <= citation.end_offset and 
+                self.end_offset >= citation.start_offset)
+
+@dataclass
 class TDocument:
     """A class for representing a piece of data."""
 
@@ -144,15 +130,29 @@ class TDocument:
 
 @dataclass
 class TChunk(BTChunk):
-    F_TO_CONTEXT = ["content", "metadata", "citation"]  # Add citation to context fields
+    F_TO_CONTEXT = ["content", "metadata", "citation"]
     
     id: THash
     content: str
     metadata: Dict[str, Any]
     citation: Optional[TCitation] = None
+    sub_chunks: List[SubChunk] = field(default_factory=list)
 
     def __str__(self) -> str:
         return self.content
+    
+    def get_sub_chunks_for_citation(self, citation: TCitation) -> List[int]:
+        """Get indices of sub-chunks that overlap with the given citation."""
+        if not self.sub_chunks or not citation:
+            return []
+            
+        overlapping_indices: List[int] = []
+        for i, sub in enumerate(self.sub_chunks):
+            if sub.overlaps_with_citation(citation):
+                overlapping_indices.append(i)
+                
+        return overlapping_indices
+            
 
 
 # Graph types
@@ -290,65 +290,37 @@ class TContext(Generic[GTNode, GTEdge, GTHash, GTChunk]):
     entities: List[Tuple[GTNode, TScore]] = field()
     relations: List[Tuple[GTEdge, TScore]] = field()
     chunks: List[Tuple[GTChunk, TScore]] = field()
+    used_sub_chunks: Dict[GTHash, List[int]] = field(default_factory=dict)
 
-    def truncate(self, max_chars: Dict[str, int], output_context_str: bool = False, query: Optional[str] = None) -> str:
-        """Generate a tabular representation of the context with optional sentence highlighting.
+    def truncate(self, max_chars: Dict[str, int], output_context_str: bool = False) -> str:
+        """Generate a tabular representation of the context.
 
-        Args:
-            max_chars: Maximum characters for each context element.
-            output_context_str: Whether to generate a context string.
-            query: Optional query to use for sentence highlighting.
-
-        Returns:
-            A string representation of the context.
+        Truncate the tables to the maximum number of assigned tokens.
         """
-        # Score sentences if query is provided
-        if query:
-            # Import here to avoid circular imports
-            from fast_graphrag._services._scoring_utils import score_sentences_in_chunk
-            
-            # Score sentences in each chunk using regular for loop
-            for chunk_tuple in self.chunks:
-                chunk = chunk_tuple[0]  # Get the chunk from the tuple
-                if isinstance(chunk, TChunk) and chunk.citation is not None:
-                    score_sentences_in_chunk(chunk, query)
+        # Prepare chunk strings with sub-chunk information
+        chunk_strings: List[str] = []
+        for chunk, _ in self.chunks:
+            chunk_str = str(chunk)
+            # Add sub-chunk information if available
+            chunk_id = getattr(chunk, "id", None)
+            if chunk_id in self.used_sub_chunks and self.used_sub_chunks[chunk_id]:
+                sub_indices = ", ".join([str(idx+1) for idx in sorted(self.used_sub_chunks[chunk_id])])
+                chunk_str = f"{chunk_str} (Sub-chunks: {sub_indices})"
+            chunk_strings.append(chunk_str)
         
         csv_tables: Dict[str, List[str]] = {
             "entities": dump_to_csv([e for e, _ in self.entities], ["name", "description"], with_header=True),
             "relations": dump_to_csv(
                 [r for r, _ in self.relations], ["source", "target", "description"], with_header=True
             ),
+            "chunks": dump_to_reference_list(chunk_strings),
         }
-        
-        # For chunks, use highlighted sentences if query is provided
-        if query:
-            chunk_entries: List[str] = []
-            for i, (chunk, _) in enumerate(self.chunks):
-                # Get the chunk with proper type checking
-                if isinstance(chunk, TChunk):
-                    if chunk.citation is not None:
-                        best_sentence = chunk.citation.get_most_relevant_sentence(chunk.content)
-                        if best_sentence:
-                            # Format with reference number and sentence
-                            chunk_entries.append(f"[{i+1}] {best_sentence.strip()}")
-                            continue
-                
-                # Fallback to showing the entire chunk with reference number
-                chunk_entries.append(f"[{i+1}] {str(chunk)}")
-            
-            csv_tables["chunks"] = chunk_entries
-        else:
-            # Use original reference list format
-            csv_tables["chunks"] = dump_to_reference_list([str(c) for c, _ in self.chunks])
-        
-        # Calculate row lengths
+    
         csv_tables_row_length = {k: [len(row) for row in table] for k, table in csv_tables.items()}
 
         # Truncate each csv to the maximum number of assigned tokens
         included_up_to = {key: 0 for key in ["entities", "relations", "chunks"]}
         chars_remainder = 0
-        
-        # Truncation logic
         while True:
             last_char_remainder = chars_remainder
             # Keep augmenting the context until feasible
@@ -408,17 +380,9 @@ class TContext(Generic[GTNode, GTEdge, GTHash, GTChunk]):
                 context.append("\n## Relationships: Not provided\n")
 
             if len(self.chunks):
-                if query:
-                    # For highlighted sentences, use a more readable format
-                    context.extend(["\n## Relevant Sentences\n"])
-                    context.extend(csv_tables["chunks"][: included_up_to["chunks"]])
-                    context.append("")
-                else:
-                    # Use original format for non-highlighted chunks
-                    context.extend(["\n## Sources\n", *csv_tables["chunks"][: included_up_to["chunks"]], ""])
+                context.extend(["\n## Sources\n", *csv_tables["chunks"][: included_up_to["chunks"]], ""])
             else:
                 context.append("\n## Sources: Not provided\n")
-                
         return "\n".join(context)
 
 
@@ -489,33 +453,40 @@ class TQueryResponse(Generic[GTNode, GTEdge, GTHash, GTChunk]):
 
         def to_dict(self):
             return {doc.index: doc.to_dict() for doc in self.documents.values() if doc.index is not None}
-        
-    def format_references(self, format_fn: Callable[[int, List[int], Any], str] = lambda i, _, __: f"[{i}]"):
+
+    def format_references(self, format_fn: Callable[[int, List[int], List[int], Any], str] = lambda i, _, sub_chunks, __: f"[{i}{' (Sub-chunks: ' + ', '.join(map(str, sub_chunks)) + ')' if sub_chunks else ''}]"):
         # Create list of documents
         reference_list = self._ReferenceList()
-        ref2data: Dict[str, Tuple[int, int]] = {}
+        ref2data: Dict[str, Tuple[int, int, List[int]]] = {}  # Now includes sub-chunk indices
 
         for i, (chunk, _) in enumerate(self.context.chunks):
             metadata: Dict[str, Any] = getattr(chunk, "metadata", {})
             chunk_id = int(chunk.id)
+            
+            # Get sub-chunk information if available
+            sub_chunks = []
+            if hasattr(self.context, "used_sub_chunks") and chunk_id in self.context.used_sub_chunks:
+                sub_chunks = [idx + 1 for idx in sorted(self.context.used_sub_chunks[chunk_id])]  # 1-based indices
+            
             if metadata == {}:
                 doc_id = chunk_id
             else:
                 doc_id = hash(frozenset(metadata.items()))
             reference_list.documents[doc_id].metadata = metadata
             reference_list.documents[doc_id].chunks[chunk_id] = TQueryResponse._Chunk(chunk_id, str(chunk))
-            ref2data[str(i + 1)] = (doc_id, chunk_id)
+            ref2data[str(i + 1)] = (doc_id, chunk_id, sub_chunks)
 
         def _replace_fn(match: str | re.Match[str]) -> str:
             text = match if isinstance(match, str) else match.group()
             references = re.findall(r"(\d+)", text)
-            seen_docs: Dict[int, List[int]] = defaultdict(list)
+            seen_docs: Dict[int, Dict[int, List[int]]] = defaultdict(lambda: defaultdict(list))
 
             for reference in references:
                 d = ref2data.get(reference, None)
                 if d is None:
                     continue
-                seen_docs[d[0]].append(d[1])
+                doc_id, chunk_id, sub_chunks = d
+                seen_docs[doc_id][chunk_id] = sub_chunks
 
             r = ""
             for reference in references:
@@ -523,14 +494,19 @@ class TQueryResponse(Generic[GTNode, GTEdge, GTHash, GTChunk]):
                 if d is None:
                     continue
 
-                doc_id = d[0]
-                chunk_ids = seen_docs.get(doc_id, None)
-                if chunk_ids is None:
+                doc_id, chunk_id, sub_chunks = d
+                chunk_ids = seen_docs.get(doc_id, {}).keys()
+                if not chunk_ids:
                     continue
                 seen_docs.pop(doc_id)
 
                 doc_index, doc = reference_list.get_doc(doc_id)
-                r += format_fn(doc_index, [doc.get_chunk(id)[0] for id in chunk_ids], doc.metadata)
+                r += format_fn(
+                    doc_index, 
+                    [doc.get_chunk(id)[0] for id in chunk_ids], 
+                    sub_chunks,  # Pass the sub-chunk indices
+                    doc.metadata
+                )
             return r
 
         return re.sub(r"\[\d[\s\d\]\[]*\]", _replace_fn, self.response), reference_list.to_dict()
