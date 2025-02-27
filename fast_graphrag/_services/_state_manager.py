@@ -245,17 +245,40 @@ class DefaultStateManagerService(BaseStateManagerService[TEntity, TRelation, THa
                 if relationship is not None:
                     relevant_relationships.append((relationship, s))
 
-            # Extract relevant chunks
+            # Extract relevant chunks with sub-chunk scoring
             chunk_scores = self.chunk_ranking_policy(
                 await self._score_chunks_by_relations(relationships_score=relation_scores)
             )
+            
             indices, scores = extract_sorted_scores(chunk_scores)
             relevant_chunks: List[Tuple[TChunk, TScore]] = []
-            for chunk, s in zip(await self.chunk_storage.get_by_index(indices), scores):
+            used_sub_chunks_dict: Dict[THash, List[int]] = {}
+            
+            for chunk, original_score in zip(await self.chunk_storage.get_by_index(indices), scores):
                 if chunk is not None:
-                    relevant_chunks.append((chunk, s))
+                    enhanced_score = float(original_score)
+                    used_sub_chunk_indices: List[int] = []
+                    
+                    if chunk.sub_chunks:
+                        sub_chunk_scores = await self.score_sub_chunks(query, chunk)
+                        
+                        # Option 1: Amplify chunk score by best sub-chunk score
+                        max_sub_chunk_score = max(score for _, score in sub_chunk_scores)
+                        enhanced_score = float(original_score * (1 + max_sub_chunk_score))
+                        
+                        # Option 2: Select top N most relevant sub-chunks
+                        top_sub_chunks = sorted(sub_chunk_scores, key=lambda x: x[1], reverse=True)[:3]
+                        used_sub_chunk_indices = [idx for idx, _ in top_sub_chunks]
+                    
+                    relevant_chunks.append((chunk, cast(TScore, enhanced_score)))
 
-            # Create context with empty used_sub_chunks dictionary
+                    if used_sub_chunk_indices:
+                        used_sub_chunks_dict[chunk.id] = used_sub_chunk_indices
+
+            # Sort chunks by the enhanced scores
+            relevant_chunks.sort(key=lambda x: x[1], reverse=True)
+
+            # Create context with used_sub_chunks
             context = TContext[TEntity, TRelation, THash, TChunk](
                 entities=relevant_entities,
                 relations=relevant_relationships,
@@ -263,66 +286,13 @@ class DefaultStateManagerService(BaseStateManagerService[TEntity, TRelation, THa
                 used_sub_chunks={}
             )
             
-            # Track which sub-chunks are used for each entity's citations
-            for entity, _ in relevant_entities:
-                if hasattr(entity, "citations") and entity.citations:
-                    for citation in entity.citations:
-                        for chunk, _ in relevant_chunks:
-                            if not hasattr(chunk, "citation") or not chunk.citation:
-                                continue
-                                
-                            # Check if this citation falls within this chunk
-                            if (citation.start_offset >= chunk.citation.start_offset and 
-                                citation.end_offset <= chunk.citation.end_offset):
-                                
-                                # Find sub-chunks that overlap with this citation
-                                if hasattr(chunk, "sub_chunks") and chunk.sub_chunks:
-                                    overlapping_indices: List[int] = []
-                                    for i, sub in enumerate(chunk.sub_chunks):
-                                        if (sub.start_offset <= citation.end_offset and 
-                                            sub.end_offset >= citation.start_offset):
-                                            overlapping_indices.append(i)
-                                    
-                                    # Store in context.used_sub_chunks
-                                    if overlapping_indices:
-                                        if chunk.id not in context.used_sub_chunks:
-                                            context.used_sub_chunks[chunk.id] = []
-                                        
-                                        # Add any new sub-chunks
-                                        for idx in overlapping_indices:
-                                            if idx not in context.used_sub_chunks[chunk.id]:
-                                                context.used_sub_chunks[chunk.id].append(idx)
+            # Populate used_sub_chunks for each chunk
+            for chunk, _ in relevant_chunks:
+                if chunk.sub_chunks:
+                    sub_chunk_scores = await self.score_sub_chunks(query, chunk)
+                    top_sub_chunks = sorted(sub_chunk_scores, key=lambda x: x[1], reverse=True)[:3]
+                    context.used_sub_chunks[chunk.id] = [idx for idx, _ in top_sub_chunks]
 
-            # Do the same for relations
-            for relation, _ in relevant_relationships:
-                if hasattr(relation, "citations") and relation.citations:
-                    for citation in relation.citations:
-                        for chunk, _ in relevant_chunks:
-                            if not hasattr(chunk, "citation") or not chunk.citation:
-                                continue
-                                
-                            # Check if this citation falls within this chunk
-                            if (citation.start_offset >= chunk.citation.start_offset and 
-                                citation.end_offset <= chunk.citation.end_offset):
-                                
-                                # Find sub-chunks that overlap with this citation
-                                if hasattr(chunk, "sub_chunks") and chunk.sub_chunks:
-                                    overlapping_indices = []
-                                    for i, sub in enumerate(chunk.sub_chunks):
-                                        if (sub.start_offset <= citation.end_offset and 
-                                            sub.end_offset >= citation.start_offset):
-                                            overlapping_indices.append(i)
-                                    
-                                    # Store in context.used_sub_chunks
-                                    if overlapping_indices:
-                                        if chunk.id not in context.used_sub_chunks:
-                                            context.used_sub_chunks[chunk.id] = []
-                                        
-                                        # Add any new sub-chunks
-                                        for idx in overlapping_indices:
-                                            if idx not in context.used_sub_chunks[chunk.id]:
-                                                context.used_sub_chunks[chunk.id].append(idx)
-            
             return context
         except Exception as e:
             logger.error(f"Error during scoring of chunks and relationships.\n{e}")
@@ -374,7 +344,32 @@ class DefaultStateManagerService(BaseStateManagerService[TEntity, TRelation, THa
         if c2r is None:
             logger.warning("No relationships to chunks map was loaded.")
             return csr_matrix((1, await self.chunk_storage.size()))
-        return relationships_score.dot(c2r)  # (1, #relationships) x (#relationships, #chunks) => (1, #chunks)
+        
+        # Initial chunk scores based on relationships
+        chunk_scores = relationships_score.dot(c2r)
+        
+        # Modify chunk scores based on query relevance of sub-chunks
+        # This requires additional processing during context generation
+        return chunk_scores
+    
+    async def score_sub_chunks(self, query: str, chunk: TChunk) -> List[Tuple[int, float]]:
+        # Compute embeddings for sub-chunks
+        sub_chunk_embeddings: npt.NDArray[np.float32] = await self.embedding_service.encode([
+            sub.content for sub in chunk.sub_chunks
+        ])
+        
+        # Compute query embedding
+        query_embedding: npt.NDArray[np.float32] = await self.embedding_service.encode([query])
+        
+        # Compute similarity scores (cosine similarity)
+        sub_chunk_scores: List[float] = [
+            float(np.dot(query_embedding.flatten(), sub_embedding.flatten()) / 
+                (np.linalg.norm(query_embedding) * np.linalg.norm(sub_embedding)))
+            for sub_embedding in sub_chunk_embeddings
+        ]
+        
+        # Return sub-chunk indices with their scores
+        return list(enumerate(sub_chunk_scores))
 
     ####################################################################################################
 
