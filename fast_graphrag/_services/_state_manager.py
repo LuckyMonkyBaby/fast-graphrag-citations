@@ -218,7 +218,7 @@ class DefaultStateManagerService(BaseStateManagerService[TEntity, TRelation, THa
         # Score entities
         try:
             graph_entity_scores = self.entity_ranking_policy(
-                await self._score_entities_by_graph(entity_scores=vdb_entity_scores.tocsr())
+                await self._score_entities_by_graph(entity_scores=vdb_entity_scores)
             )
         except Exception as e:
             logger.error(f"Error during graph scoring for entities. Non-zero elements: {vdb_entity_scores.nnz}.\n{e}")
@@ -245,55 +245,17 @@ class DefaultStateManagerService(BaseStateManagerService[TEntity, TRelation, THa
                 if relationship is not None:
                     relevant_relationships.append((relationship, s))
 
-            # Extract relevant chunks with sub-chunk scoring
+            # Extract relevant chunks
             chunk_scores = self.chunk_ranking_policy(
                 await self._score_chunks_by_relations(relationships_score=relation_scores)
             )
-            
             indices, scores = extract_sorted_scores(chunk_scores)
             relevant_chunks: List[Tuple[TChunk, TScore]] = []
-            used_sub_chunks_dict: Dict[THash, List[int]] = {}
-            
-            for chunk, original_score in zip(await self.chunk_storage.get_by_index(indices), scores):
+            for chunk, s in zip(await self.chunk_storage.get_by_index(indices), scores):
                 if chunk is not None:
-                    enhanced_score = float(original_score)
-                    used_sub_chunk_indices: List[int] = []
-                    
-                    if chunk.sub_chunks:
-                        sub_chunk_scores = await self.score_sub_chunks(query, chunk)
-                        
-                        # Option 1: Amplify chunk score by best sub-chunk score
-                        max_sub_chunk_score = max(score for _, score in sub_chunk_scores)
-                        enhanced_score = float(original_score * (1 + max_sub_chunk_score))
-                        
-                        # Option 2: Select top N most relevant sub-chunks
-                        top_sub_chunks = sorted(sub_chunk_scores, key=lambda x: x[1], reverse=True)[:3]
-                        used_sub_chunk_indices = [idx for idx, _ in top_sub_chunks]
-                    
-                    relevant_chunks.append((chunk, cast(TScore, enhanced_score)))
+                    relevant_chunks.append((chunk, s))
 
-                    if used_sub_chunk_indices:
-                        used_sub_chunks_dict[chunk.id] = used_sub_chunk_indices
-
-            # Sort chunks by the enhanced scores
-            relevant_chunks.sort(key=lambda x: x[1], reverse=True)
-
-            # Create context with used_sub_chunks
-            context = TContext[TEntity, TRelation, THash, TChunk](
-                entities=relevant_entities,
-                relations=relevant_relationships,
-                chunks=relevant_chunks,
-                used_sub_chunks={}
-            )
-            
-            # Populate used_sub_chunks for each chunk
-            for chunk, _ in relevant_chunks:
-                if chunk.sub_chunks:
-                    sub_chunk_scores = await self.score_sub_chunks(query, chunk)
-                    top_sub_chunks = sorted(sub_chunk_scores, key=lambda x: x[1], reverse=True)[:3]
-                    context.used_sub_chunks[chunk.id] = [idx for idx, _ in top_sub_chunks]
-
-            return context
+            return TContext(entities=relevant_entities, relations=relevant_relationships, chunks=relevant_chunks)
         except Exception as e:
             logger.error(f"Error during scoring of chunks and relationships.\n{e}")
             raise e
@@ -344,32 +306,7 @@ class DefaultStateManagerService(BaseStateManagerService[TEntity, TRelation, THa
         if c2r is None:
             logger.warning("No relationships to chunks map was loaded.")
             return csr_matrix((1, await self.chunk_storage.size()))
-        
-        # Initial chunk scores based on relationships
-        chunk_scores = relationships_score.dot(c2r)
-        
-        # Modify chunk scores based on query relevance of sub-chunks
-        # This requires additional processing during context generation
-        return chunk_scores
-    
-    async def score_sub_chunks(self, query: str, chunk: TChunk) -> List[Tuple[int, float]]:
-        # Compute embeddings for sub-chunks
-        sub_chunk_embeddings: npt.NDArray[np.float32] = await self.embedding_service.encode([
-            sub.content for sub in chunk.sub_chunks
-        ])
-        
-        # Compute query embedding
-        query_embedding: npt.NDArray[np.float32] = await self.embedding_service.encode([query])
-        
-        # Compute similarity scores (cosine similarity)
-        sub_chunk_scores: List[float] = [
-            float(np.dot(query_embedding.flatten(), sub_embedding.flatten()) / 
-                (np.linalg.norm(query_embedding) * np.linalg.norm(sub_embedding)))
-            for sub_embedding in sub_chunk_embeddings
-        ]
-        
-        # Return sub-chunk indices with their scores
-        return list(enumerate(sub_chunk_scores))
+        return relationships_score.dot(c2r)  # (1, #relationships) x (#relationships, #chunks) => (1, #chunks)
 
     ####################################################################################################
 

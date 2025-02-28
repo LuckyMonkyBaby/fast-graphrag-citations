@@ -216,6 +216,7 @@ class BaseGraphRAG(Generic[GTEmbedding, GTHash, GTChunk, GTNode, GTEdge, GTId]):
         
         # Select the appropriate prompt based on prompt_type
         prompt_key = self._get_prompt_key(params)
+
         
         # Send the prompt to the LLM
         llm_response, _ = await format_and_send_prompt(

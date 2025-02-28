@@ -119,6 +119,13 @@ class SubChunk:
         """Check if this sub-chunk overlaps with a citation."""
         return (self.start_offset <= citation.end_offset and 
                 self.end_offset >= citation.start_offset)
+    
+@dataclass
+class SubChunkReference:
+    chunk_id: THash  # Original chunk ID
+    sub_chunk_indices: List[int]  # Indices of sub-chunks
+    file_name: Optional[str] = None  # Name of the source file
+    metadata: Optional[Dict[str, Any]] = None  # Additional metadata about the source
 
 @dataclass
 class TDocument:
@@ -290,32 +297,19 @@ class TContext(Generic[GTNode, GTEdge, GTHash, GTChunk]):
     entities: List[Tuple[GTNode, TScore]] = field()
     relations: List[Tuple[GTEdge, TScore]] = field()
     chunks: List[Tuple[GTChunk, TScore]] = field()
-    used_sub_chunks: Dict[GTHash, List[int]] = field(default_factory=dict)
 
     def truncate(self, max_chars: Dict[str, int], output_context_str: bool = False) -> str:
-        """Generate a tabular representation of the context.
+        """Genearate a tabular representation of the context.
 
         Truncate the tables to the maximum number of assigned tokens.
         """
-        # Prepare chunk strings with sub-chunk information
-        chunk_strings: List[str] = []
-        for chunk, _ in self.chunks:
-            chunk_str = str(chunk)
-            # Add sub-chunk information if available
-            chunk_id = getattr(chunk, "id", None)
-            if chunk_id in self.used_sub_chunks and self.used_sub_chunks[chunk_id]:
-                sub_indices = ", ".join([str(idx+1) for idx in sorted(self.used_sub_chunks[chunk_id])])
-                chunk_str = f"{chunk_str} (Sub-chunks: {sub_indices})"
-            chunk_strings.append(chunk_str)
-        
         csv_tables: Dict[str, List[str]] = {
             "entities": dump_to_csv([e for e, _ in self.entities], ["name", "description"], with_header=True),
             "relations": dump_to_csv(
                 [r for r, _ in self.relations], ["source", "target", "description"], with_header=True
             ),
-            "chunks": dump_to_reference_list(chunk_strings),
+            "chunks": dump_to_reference_list([str(c) for c, _ in self.chunks]),
         }
-    
         csv_tables_row_length = {k: [len(row) for row in table] for k, table in csv_tables.items()}
 
         # Truncate each csv to the maximum number of assigned tokens
@@ -465,8 +459,6 @@ class TQueryResponse(Generic[GTNode, GTEdge, GTHash, GTChunk]):
             
             # Get sub-chunk information if available
             sub_chunks = []
-            if hasattr(self.context, "used_sub_chunks") and chunk_id in self.context.used_sub_chunks:
-                sub_chunks = [idx + 1 for idx in sorted(self.context.used_sub_chunks[chunk_id])]  # 1-based indices
             
             if metadata == {}:
                 doc_id = chunk_id
