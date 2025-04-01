@@ -218,7 +218,7 @@ class DefaultStateManagerService(BaseStateManagerService[TEntity, TRelation, THa
         # Score entities
         try:
             graph_entity_scores = self.entity_ranking_policy(
-                await self._score_entities_by_graph(entity_scores=vdb_entity_scores)
+                await self._score_entities_by_graph(entity_scores=vdb_entity_scores.tocsr())
             )
         except Exception as e:
             logger.error(f"Error during graph scoring for entities. Non-zero elements: {vdb_entity_scores.nnz}.\n{e}")
@@ -281,12 +281,12 @@ class DefaultStateManagerService(BaseStateManagerService[TEntity, TRelation, THa
             return all_entity_probs_by_query_entity
         # Normalize the scores
         all_entity_probs_by_query_entity /= all_entity_probs_by_query_entity.sum(axis=1) + 1e-8
-        all_entity_weights: csr_matrix = all_entity_probs_by_query_entity.max(axis=0)  # (1, #all_entities)
+        all_entity_weights: csr_matrix = all_entity_probs_by_query_entity.max(axis=0).tocsr()  # (1, #all_entities)
 
         if self.node_specificity:
-            all_entity_weights = all_entity_weights.multiply(1.0 / await self._get_entities_to_num_docs())
+            all_entity_weights = all_entity_weights.multiply(1.0 / await self._get_entities_to_num_docs()) # type: ignore
 
-        return all_entity_weights
+        return all_entity_weights # type: ignore
 
     async def _score_entities_by_graph(self, entity_scores: Optional[csr_matrix]) -> csr_matrix:
         graph_weighted_scores = await self.graph_storage.score_nodes(entity_scores)

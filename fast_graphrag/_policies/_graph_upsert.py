@@ -329,14 +329,14 @@ class EdgeUpsertPolicy_UpsertValidAndMergeSimilarByLLM(BaseEdgeUpsertPolicy[TRel
             )
             tasks = await asyncio.gather(*edge_upsert_tasks)
             if len(tasks):
-                upserted_edges, new_edges, to_delete_edges = zip(*tasks)
+                upserted_edges, new_edges, to_delete_edges = map(list, zip(*tasks))
         else:
             tasks = [
                 await self._upsert_edge(llm, target, edges, source_entity, target_entity)
                 for (source_entity, target_entity), edges in grouped_edges.items()
             ]
             if len(tasks):
-                upserted_edges, new_edges, to_delete_edges = zip(*tasks)
+                upserted_edges, new_edges, to_delete_edges = map(list, zip(*tasks))
         await target.delete_edges_by_index(chain(*to_delete_edges))
         new_indices = await target.insert_edges(chain(*new_edges))
         return target, chain(*upserted_edges, zip(new_indices, chain(*new_edges)))
